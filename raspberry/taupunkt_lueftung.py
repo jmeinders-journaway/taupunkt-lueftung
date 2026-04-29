@@ -1,114 +1,154 @@
-import time
 import math
-import requests
+import time
 from datetime import datetime, timezone
+
+import requests
+import dht11
 import board
 import adafruit_dht
 import RPi.GPIO as GPIO
 
-# ── Konfiguration ──────────────────────────────────────────────
-DHT_PIN        = board.D4           # DHT11 an BCM4
-FAN_PIN        = 17                 # Luefter direkt an BCM17
-THRESHOLD_C    = 3.0                # Luefter AN wenn Temp - Taupunkt < 3 C
-INTERVAL_S     = 2                  # Messintervall in Sekunden
-LOCATION       = "Innen"           # "Innen" oder "Aussen"
+# ============================================================
+# Supabase Verbindung
+# ============================================================
 
-SUPABASE_URL   = "https://DEIN-PROJEKT.supabase.co"
-SUPABASE_KEY   = "dein-anon-public-key"
-# ──────────────────────────────────────────────────────────────
+SUPABASE_URL = "https://.supabase.co"
+SUPABASE_ANON_KEY = ""
+SUPABASE_TABLE_URL = "{SUPABASE_URL}/rest/v1/measurements"
 
-dht = adafruit_dht.DHT11(DHT_PIN)
+SUPABASE_HEADERS = {
+    "apikey": SUPABASE_ANON_KEY,
+    "Authorization": f"Bearer {SUPABASE_ANON_KEY}",
+    "Content-Type": "application/json",
+    "Prefer": "return=minimal",
+}
 
-GPIO.setmode(GPIO.BCM)
-GPIO.setup(FAN_PIN, GPIO.OUT, initial=GPIO.LOW)
+# ============================================================
+# GPIO Pins
+# ============================================================
 
-print("Taupunkt-Lueftung gestartet")
-print(f"Standort : {LOCATION}")
-print(f"Schwelle : {THRESHOLD_C} C")
-print("Hinweis  : Alle Schalter links/rechts auf OFF stellen!\n")
+INSIDE_PIN = board.D4
+OUTSIDE_PIN = board.D26
 
+# ============================================================
+# Logik
+# ============================================================
 
-def plausible(temp_c, hum):
-    return (-10.0 <= temp_c <= 60.0) and (1.0 <= hum <= 100.0)
+DEWPOINT_DIFF_ON = 0.5
+DEWPOINT_DIFF_OFF = 0.2
 
-
-def dew_point(temp_c, hum):
-    a, b = 17.62, 243.12
-    gamma = (a * temp_c) / (b + temp_c) + math.log(hum / 100.0)
+def dew_point_c(temp_c: float, hum_percent: float) -> float:
+    a = 17.62
+    b = 243.12
+    gamma = (a * temp_c) / (b + temp_c) + math.log(hum_percent / 100.0)
     return (b * gamma) / (a - gamma)
 
 
-def set_fan(on):
-    GPIO.output(FAN_PIN, GPIO.HIGH if on else GPIO.LOW)
+def plausible(temp_c: float, hum_percent: float) -> bool:
+    return (-10.0 <= temp_c <= 60.0) and (1.0 <= hum_percent <= 100.0)
 
 
-def save_to_supabase(ts, temp, hum, dp, fan_on):
-    try:
-        requests.post(
-            f"{SUPABASE_URL}/rest/v1/measurements",
-            headers={
-                "apikey":        SUPABASE_KEY,
-                "Authorization": f"Bearer {SUPABASE_KEY}",
-                "Content-Type":  "application/json",
-            },
-            json={
-                "ts":          ts,
-                "location":    LOCATION,
-                "temp_c":      temp,
-                "hum_percent": hum,
-                "dewpoint_c":  dp,
-                "fan_on":      bool(fan_on),
-            },
-            timeout=5,
-        )
-    except requests.RequestException as e:
-        print(f"Supabase Fehler: {e}")
+def save(location, temp, hum, dew, fan_on, ts):
+    payload = {
+        "ts": ts,
+        "location": location,
+        "temp_c": temp,
+        "hum_percent": hum,
+        "dewpoint_c": dew,
+        "fan_on": fan_on
+    }
+
+    response = requests.post(
+        SUPABASE_TABLE_URL,
+        headers=SUPABASE_HEADERS,
+        json=payload,
+        timeout=10
+    )
+
+    if response.status_code not in (200, 201, 204):
+        print(f"Supabase Fehler ({location}): {response.status_code}")
+        print(response.text)
 
 
-try:
+def main():
+    GPIO.setwarnings(False)
+    GPIO.setmode(GPIO.BCM)
+    GPIO.cleanup()
+
+    dht_inside = adafruit_dht.DHT22(INSIDE_PIN)
+    dht_outside = adafruit_dht.DHT22(OUTSIDE_PIN)
+
+    fan_on = False  # nur berechnet, NICHT geschaltet
+
+    print("Taupunkt Messung (ohne Lfter) gestartet")
+    print("=" * 50)
+
+    
     while True:
         try:
-            temp = dht.temperature
-            hum  = dht.humidity
+            # Innen messen
+            t_in = dht_inside.temperature
+            h_in = dht_inside.humidity
 
-            if temp is None or hum is None:
-                print("Keine Daten -> neuer Versuch...")
-                time.sleep(INTERVAL_S)
+            time.sleep(2)  # wichtig bei DHT!
+
+            # Auen messen
+            t_out = dht_outside.temperature
+            h_out = dht_outside.humidity
+
+            if None in (t_in, h_in, t_out, h_out):
+                print("Sensor liefert None, retry...")
+                time.sleep(2)
                 continue
 
-            if not plausible(temp, hum):
-                print(f"Unplausibel -> T={temp:.1f} C, H={hum:.1f} %")
-                time.sleep(INTERVAL_S)
+            if not plausible(t_in, h_in) or not plausible(t_out, h_out):
+                print("Unplausible Werte, bersprungen")
+                time.sleep(2)
                 continue
 
-            taupunkt = dew_point(temp, hum)
-            abstand  = temp - taupunkt
-            fan_on   = abstand < THRESHOLD_C
+            dp_in = dew_point_c(t_in, h_in)
+            dp_out = dew_point_c(t_out, h_out)
 
-            set_fan(fan_on)
+            delta = dp_in - dp_out
+
+            # Lfter nur berechnen
+            if not fan_on and delta >= DEWPOINT_DIFF_ON:
+                fan_on = True
+            elif fan_on and delta <= DEWPOINT_DIFF_OFF:
+                fan_on = False
 
             ts = datetime.now(timezone.utc).isoformat()
 
-            print(f"Zeit       : {ts}")
-            print(f"Temperatur : {temp:5.1f} C")
-            print(f"Feuchte    : {hum:5.1f} %")
-            print(f"Taupunkt   : {taupunkt:5.1f} C")
-            print(f"Abstand    : {abstand:5.1f} C")
-            print(f"Luefter    : {'AN' if fan_on else 'AUS'}")
-            print("-" * 40)
+            print(f"Zeit:              {ts}")
+            print("-" * 50)
+            print(f"Innen Temp:        {t_in:5.1f} C")
+            print(f"Innen Feuchte:     {h_in:5.1f} %")
+            print(f"Innen Taupunkt:    {dp_in:5.1f} C")
+            print("-" * 50)
+            print(f"Aussen Temp:       {t_out:5.1f} C")
+            print(f"Aussen Feuchte:    {h_out:5.1f} %")
+            print(f"Aussen Taupunkt:   {dp_out:5.1f} C")
+            print("-" * 50)
+            print(f"Differenz:         {delta:5.2f} C")
+            print(f"Luefter (berechnet): {'AN' if fan_on else 'AUS'}")
+            print("=" * 50)
 
-            save_to_supabase(ts, temp, hum, taupunkt, fan_on)
+            # Supabase speichern
+            save("Innen", t_in, h_in, dp_in, fan_on, ts)
+            save("Aussen", t_out, h_out, dp_out, fan_on, ts)
 
-            time.sleep(INTERVAL_S)
+            print("Gespeichert\n")
 
-        except RuntimeError:
-            print("Lesefehler -> neuer Versuch...")
-            time.sleep(1)
+        except RuntimeError as e:
+            # typischer DHT Fehler ? einfach ignorieren
+            print("Sensorfehler:", e)
 
-except KeyboardInterrupt:
-    print("\nMessung beendet.")
+        except Exception as e:
+            print("Fataler Fehler:", e)
+            break
 
-finally:
-    set_fan(False)
-    GPIO.cleanup()
-    print("GPIO freigegeben.")
+        time.sleep(5)
+
+
+if __name__ == "__main__":
+    main()

@@ -13,8 +13,9 @@ export function formatDay(dateStr) {
   return `${d}. ${names[parseInt(m, 10) - 1]}`
 }
 
-export function transformRows(rows) {
-  return rows.map(function(r) {
+export function transformRows(rows) {  
+  var reversed = rows.slice().reverse()
+  return reversed.map(function(r)  {
     const ts = r.ts.replace('T', ' ').slice(0, 16)
     return {
       id:       r.id,

@@ -3,7 +3,6 @@ import time
 from datetime import datetime, timezone
 
 import requests
-import dht11
 import board
 import adafruit_dht
 import RPi.GPIO as GPIO
@@ -12,7 +11,7 @@ import RPi.GPIO as GPIO
 # Supabase Verbindung
 # ============================================================
 
-SUPABASE_URL = "https://.supabase.co"
+SUPABASE_URL = ""
 SUPABASE_ANON_KEY = ""
 SUPABASE_TABLE_URL = "{SUPABASE_URL}/rest/v1/measurements"
 
@@ -30,12 +29,14 @@ SUPABASE_HEADERS = {
 INSIDE_PIN = board.D4
 OUTSIDE_PIN = board.D26
 
+FAN_PIN = 21
+
 # ============================================================
 # Logik
 # ============================================================
 
-DEWPOINT_DIFF_ON = 0.5
-DEWPOINT_DIFF_OFF = 0.2
+DEWPOINT_DIFF_ON = 4.0
+DEWPOINT_DIFF_OFF = 3.0
 
 def dew_point_c(temp_c: float, hum_percent: float) -> float:
     a = 17.62
@@ -74,11 +75,15 @@ def main():
     GPIO.setwarnings(False)
     GPIO.setmode(GPIO.BCM)
     GPIO.cleanup()
+    
+    GPIO.setup(FAN_PIN, GPIO.OUT)
+
+    GPIO.output(FAN_PIN, GPIO.HIGH)
 
     dht_inside = adafruit_dht.DHT22(INSIDE_PIN)
     dht_outside = adafruit_dht.DHT22(OUTSIDE_PIN)
 
-    fan_on = False  # nur berechnet, NICHT geschaltet
+    fan_on = False
 
     print("Taupunkt Messung (ohne Lfter) gestartet")
     print("=" * 50)
@@ -90,7 +95,7 @@ def main():
             t_in = dht_inside.temperature
             h_in = dht_inside.humidity
 
-            time.sleep(2)  # wichtig bei DHT!
+            time.sleep(2) 
 
             # Auen messen
             t_out = dht_outside.temperature
@@ -110,13 +115,15 @@ def main():
             dp_out = dew_point_c(t_out, h_out)
 
             delta = dp_in - dp_out
-
-            # Lfter nur berechnen
+            
             if not fan_on and delta >= DEWPOINT_DIFF_ON:
-                fan_on = True
-            elif fan_on and delta <= DEWPOINT_DIFF_OFF:
-                fan_on = False
+             fan_on = True
+             GPIO.output(FAN_PIN, GPIO.LOW)   # EIN
 
+            elif fan_on and delta <= DEWPOINT_DIFF_OFF:
+             fan_on = False
+             GPIO.output(FAN_PIN, GPIO.HIGH)  # AUS
+            
             ts = datetime.now(timezone.utc).isoformat()
 
             print(f"Zeit:              {ts}")
@@ -140,11 +147,13 @@ def main():
             print("Gespeichert\n")
 
         except RuntimeError as e:
-            # typischer DHT Fehler ? einfach ignorieren
             print("Sensorfehler:", e)
 
         except Exception as e:
             print("Fataler Fehler:", e)
+            
+            GPIO.output(FAN_PIN, GPIO.HIGH)
+            GPIO.cleanup()
             break
 
         time.sleep(5)

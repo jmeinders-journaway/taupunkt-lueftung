@@ -12,6 +12,24 @@ const LEGEND_STYLE = {
   fontFamily: "'JetBrains Mono', monospace",
 }
 
+function buildFanAreas(data, xKey) {
+  var areas = []
+  var start = null
+  for (var i = 0; i < data.length; i++) {
+    var d = data[i]
+    if (d.fan && start === null) {
+      start = d[xKey]
+    } else if (!d.fan && start !== null) {
+      areas.push({ x1: start, x2: data[i - 1][xKey] })
+      start = null
+    }
+  }
+  if (start !== null) {
+    areas.push({ x1: start, x2: data[data.length - 1][xKey] })
+  }
+  return areas
+}
+
 export default function CondensationChart({ allData, activeDay }) {
   const filtered = activeDay === 'all'
     ? allData.filter(function(_, i) { return i % 2 === 0 })
@@ -21,6 +39,10 @@ export default function CondensationChart({ allData, activeDay }) {
     + (activeDay === 'all' ? 'Alle Tage' : formatDay(activeDay))
 
   const xKey = activeDay === 'all' ? 'ts' : 'label'
+
+  const fanAreas = buildFanAreas(filtered, xKey)
+
+  const interval = filtered.length > 50 ? Math.floor(filtered.length / 10) : (activeDay === 'all' ? 11 : 3)
 
   return (
     <div style={{
@@ -42,7 +64,7 @@ export default function CondensationChart({ allData, activeDay }) {
           <XAxis
             dataKey={xKey}
             tick={AXIS_TICK}
-            interval={activeDay === 'all' ? 11 : 3}
+            interval={interval}
             tickFormatter={function(v) { return v.slice(-5) }}
           />
           <YAxis
@@ -57,6 +79,18 @@ export default function CondensationChart({ allData, activeDay }) {
             formatter={function(v, name) { return [v + '\u00b0C', name] }}
           />
           <Legend wrapperStyle={LEGEND_STYLE} />
+          {fanAreas.map(function(a, i) {
+            return (
+                <ReferenceArea
+                    key={i}
+                    x1={a.x1}
+                    x2={a.x2}
+                    fill="#fb923c"
+                    fillOpacity={0.18}
+                    strokeOpacity={0}
+                />
+            )
+          })}
           <Line
             type="monotone"
             dataKey="temp"
